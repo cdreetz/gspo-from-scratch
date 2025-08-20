@@ -104,7 +104,7 @@ optimizer.zero_grad(set_to_none = True)
 
 # setup log
 if master_process:
-    log_dir = ".../gspo_models"
+    log_dir = "./gspo_models"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"log.txt")
     with open(log_file, "w") as f:

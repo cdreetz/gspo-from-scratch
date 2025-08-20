@@ -1,7 +1,8 @@
 import torch
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+from datetime import datetime
 from tqdm import tqdm
 import numpy as np
 from typing import Dict
@@ -67,7 +68,8 @@ def evaluate_model(
 
     # Load test dataset (GSM8K 'main' split)
     print("Loading dataset...")
-    #dataset = load_dataset('openai/gsm8k', 'main', split='test')
+    dataset = load_dataset('openai/gsm8k', 'main', split='test')
+    dataset.save_to_disk('gsm8k_data/')
     dataset = load_from_disk('gsm8k_data/')['test']
     if num_samples:
         dataset = dataset.select(range(num_samples))
@@ -172,7 +174,7 @@ def evaluate_model(
 
 if __name__ == "__main__":
     print("Starting GSM8K evaluation...")
-    checkpoint_path = "Your_model_path"  # Update path as needed
+    checkpoint_path = ".gspo_models/qwen2_5-1_5b-gspo"  # Update path as needed
 
     metrics = evaluate_model(
         model_path=checkpoint_path,
