@@ -42,3 +42,29 @@ def get_lr(it, max_steps, warmup_steps = None, max_lr=1e-5, min_lr=1e-6):
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
+
+
+def debug_tensor(tensor, name, check_finite=True):
+    """Debug utility to check tensor health"""
+    if torch.isnan(tensor).any():
+        print(f"ERROR: {name} contains NaN!")
+        return False
+    if check_finite and torch.isinf(tensor).any():
+        print(f"ERROR: {name} contains Inf!")
+        return False
+    return True
+
+def safe_advantages(rewards, eps=1e-8):
+    """Compute advantages with numerical stability"""
+    reward_mean = rewards.mean(dim=-1, keepdim=True)
+    reward_std = rewards.std(dim=-1, keepdim=True)
+    
+    reward_std = torch.clamp(reward_std, min=eps)
+    
+    advantages = (rewards - reward_mean) / reward_std
+    
+    if not debug_tensor(advantages, "advantages"):
+        print("Warning: Using zero advantages due to numerical issues")
+        advantages = torch.zeros_like(advantages)
+    
+    return advantages

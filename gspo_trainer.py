@@ -1,10 +1,8 @@
-# Fixed GSPO Trainer with critical bug fixes
-# Main fixes:
-# 1. Use clip_grad_norm_ instead of deprecated clip_grad_norm
-# 2. Add numerical stability checks 
-# 3. Fix tensor dtype consistency
-# 4. Add debugging and error handling
-
+# https://www.creetz.com/grpo.html
+#
+# DDP launch for 8 gpus
+# torchrun --standalone --nproc_per_node=8 gspo_train.py
+# #
 import os
 import re
 import math
@@ -24,7 +22,9 @@ from utils import (
     extract_xml_answer, 
     compute_format_score, 
     compute_reward, 
-    get_lr
+    get_lr,
+    debug_tensor,
+    safe_advantages
 )
 
 SYSTEM_PROMPT = (
@@ -41,8 +41,8 @@ SYSTEM_PROMPT = (
 TASK_SPECIFIC_INSTRUCTIONS = "The answer must be a single integer."
 
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-clip_range = 3e-4  # Correct for GSPO
-kl_coef = 0.001    # Reduced for stability
+clip_range = 3e-4  
+kl_coef = 0.001 
 batch_size = 4     
 G = 4
 inner_iters = 4    
@@ -52,32 +52,7 @@ max_grad_norm = 0.2
 weight_decay = 0.1  
 initial_learning_rate = 3e-6
 
-def debug_tensor(tensor, name, check_finite=True):
-    """Debug utility to check tensor health"""
-    if torch.isnan(tensor).any():
-        print(f"ERROR: {name} contains NaN!")
-        return False
-    if check_finite and torch.isinf(tensor).any():
-        print(f"ERROR: {name} contains Inf!")
-        return False
-    return True
 
-def safe_advantages(rewards, eps=1e-8):
-    """Compute advantages with numerical stability"""
-    reward_mean = rewards.mean(dim=-1, keepdim=True)
-    reward_std = rewards.std(dim=-1, keepdim=True)
-    
-    # Prevent division by very small numbers
-    reward_std = torch.clamp(reward_std, min=eps)
-    
-    advantages = (rewards - reward_mean) / reward_std
-    
-    # Check for numerical issues
-    if not debug_tensor(advantages, "advantages"):
-        print("Warning: Using zero advantages due to numerical issues")
-        advantages = torch.zeros_like(advantages)
-    
-    return advantages
 
 # setup torch distributed
 dist.init_process_group(backend="nccl")
@@ -295,8 +270,6 @@ for epoch in range(num_epochs):
             )
             batch_rewards = batch_rewards.view(current_batch_size, G)
 
-
-            
             # Use safe advantage computation
             batch_advantages = safe_advantages(batch_rewards)
             
@@ -337,12 +310,11 @@ for epoch in range(num_epochs):
                 logprobs_ref_seq = (logprobs_ref * valid_mask).sum(dim=-1)  
                 logprobs_new_seq = (logprobs_new * valid_mask).sum(dim=-1)
 
-                # length normalization (key GSPO feature)
-                logprobs_old_seq = logprobs_old_seq / (seq_lens + 1e-8)  # Increased epsilon
+                # length normalization
+                logprobs_old_seq = logprobs_old_seq / (seq_lens + 1e-8)
                 logprobs_ref_seq = logprobs_ref_seq / (seq_lens + 1e-8)
                 logprobs_new_seq = logprobs_new_seq / (seq_lens + 1e-8)
 
-                # Check for numerical issues before computing ratios
                 if not debug_tensor(logprobs_old_seq, "logprobs_old_seq") or \
                    not debug_tensor(logprobs_new_seq, "logprobs_new_seq") or \
                    not debug_tensor(logprobs_ref_seq, "logprobs_ref_seq"):
@@ -350,7 +322,6 @@ for epoch in range(num_epochs):
                         print("Skipping due to problematic sequence logprobs")
                     break
 
-                # Compute importance ratio with clamping
                 log_ratio = torch.clamp(logprobs_new_seq - logprobs_old_seq, min=-10, max=10)
                 ratio_seq = torch.exp(log_ratio)
                 ratio_seq_clipped = torch.clamp(ratio_seq, 1.0 - clip_range, 1.0 + clip_range)
@@ -376,10 +347,10 @@ for epoch in range(num_epochs):
                 kl_ratio = torch.exp(kl_log_ratio)
                 individual_kl_penalty = kl_ratio - kl_log_ratio - 1
 
-                #gspo_loss = -(individual_ppo_reward - kl_coef * individual_kl_penalty).mean()
+                # gspo_loss = -(individual_ppo_reward - kl_coef * individual_kl_penalty).mean()
+                # without kl penalty
                 gspo_loss = -individual_ppo_reward.mean()
 
-                # Check for NaN loss
                 if torch.isnan(gspo_loss).any():
                     if master_process:
                         print("ERROR: NaN loss detected, skipping batch")
@@ -394,10 +365,8 @@ for epoch in range(num_epochs):
                     with open(log_file, "a") as f:
                         f.write(f'gspo training loss at step {step} with ppo_epoch {inner_iter} is: {loss_value:.6f}\n')
 
-                # Backward pass
                 gspo_loss.backward()
                 
-                # CRITICAL FIX: Use the non-deprecated gradient clipping function
                 torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
                 
                 lr = get_lr(step, max_steps, max_lr=initial_learning_rate)
