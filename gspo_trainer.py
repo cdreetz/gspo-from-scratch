@@ -279,6 +279,13 @@ for epoch in range(num_epochs):
 
             # gspo loss
             valid_mask = batch_action_mask[:, :-1].contiguous().float().view(batch_size, G, -1) # [B, G, seq_len - 1]
+            seq_lens = valid_mask.sum(dim=-1)
+            empty_sequences = (seq_lens == 0)
+
+            if empty_sequences.any():
+                if master_process:
+                    print(f"Warning found: {empty_sequences.sum().item()} empty sequences, skpping batch")
+                continue
 
             # sequence level
             logprobs_old_seq = (logprobs_old * valid_mask).sum(dim=-1) # [B, G, L] -> [B, G]
@@ -286,9 +293,9 @@ for epoch in range(num_epochs):
             logprobs_new_seq = (logprobs_new * valid_mask).sum(dim=-1) # [B, G, L] -> [B, G]
 
             # len normalization
-            logprobs_old_seq = logprobs_old_seq / (valid_mask.sum(dim=-1) + 1e-8)
-            logprobs_ref_seq = logprobs_ref_seq / (valid_mask.sum(dim=-1) + 1e-8)
-            logprobs_new_seq = logprobs_new_seq / (valid_mask.sum(dim=-1) + 1e-8)
+            logprobs_old_seq = logprobs_old_seq / (seq_lens + 1e-4)
+            logprobs_ref_seq = logprobs_ref_seq / (seq_lens + 1e-4)
+            logprobs_new_seq = logprobs_new_seq / (seq_lens + 1e-4)
 
             ratio_seq = torch.exp(logprobs_new_seq - logprobs_old_seq) # [B, G]
             ratio_seq_clipped = torch.clamp(ratio_seq, 1.0 - clip_range, 1.0 + clip_range)
@@ -327,12 +334,6 @@ for epoch in range(num_epochs):
             loss_ += gspo_loss.detach()
             dist.all_reduce(loss_, op=dist.ReduceOp.AVG)
             if master_process:
-                wandb.log({
-                    "train_loss": loss_.item(),
-                    "step": step,
-                    "ppo_epoch": inner_iter,
-                    "learning_rate": lr
-                })
                 print(f'gspo training loss at step {step} with ppo epoch {inner_iter} is {loss_:.4f}')
                 with open(log_file, "a") as f:
                     f.write(f'gspo training loss at step {step} with ppo_epoch {inner_iter} is: {loss_:.4f}\n')
@@ -340,6 +341,13 @@ for epoch in range(num_epochs):
             gspo_loss.backward()
             torch.nn.utils.clip_grad_norm(policy_model.parameters(), max_norm=max_grad_norm)
             lr = get_lr(step, max_steps)
+            if master_process:
+                wandb.log({
+                    "train_loss": loss_.item(),
+                    "step": step,
+                    "ppo_epoch": inner_iter,
+                    "learning_rate": lr
+                })
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
             optimizer.step()

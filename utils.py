@@ -1,3 +1,6 @@
+import re
+import math
+
 def extract_xml_answer(text: str) -> str:
     """Extracts the answer from a response using the <answer> tag."""
     try:
