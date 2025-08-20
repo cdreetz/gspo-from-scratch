@@ -49,7 +49,7 @@ SYSTEM_PROMPT = (
 TASK_SPECIFIC_INSTRUCTIONS = "The answer must be a single integer."
 
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-clip_range = 0.2
+clip_range = 3e-4
 kl_coef = 0.005
 batch_size = 4
 G = 4
@@ -244,8 +244,9 @@ for epoch in range(num_epochs):
         )
         batch_advantages = batch_advantages.to(local_rank)
         assert batch_advantages.shape == (batch_size, G)
-        batch_advantages = batch_advantages.unsqueeze(2).expand_as(logprobs_ref)
-        assert batch_advantages.shape == logprobs_ref.shape
+        seq_advantages = batch_advantages.view(batch_size, G)
+        #batch_advantages = batch_advantages.unsqueeze(2).expand_as(logprobs_ref)
+        #assert batch_advantages.shape == logprobs_ref.shape
 
         # inner iter
         for inner_iter in range(inner_iters):
@@ -271,12 +272,17 @@ for epoch in range(num_epochs):
             logprobs_ref_seq = (logprobs_ref * valid_mask).sum(dim=-1) # [B, G, L] -> [B, G]
             logprobs_new_seq = (logprobs_new * valid_mask).sum(dim=-1) # [B, G, L] -> [B, G]
 
+            # len normalization
+            logprobs_old_seq = logprobs_old_seq / (valid_mask.sum(dim=-1) + 1e-8)
+            logprobs_ref_seq = logprobs_ref_seq / (valid_mask.sum(dim=-1) + 1e-8)
+            logprobs_new_seq = logprobs_new_seq / (valid_mask.sum(dim=-1) + 1e-8)
+
             ratio_seq = torch.exp(logprobs_new_seq - logprobs_old_seq) # [B, G]
             ratio_seq_clipped = torch.clamp(ratio_seq, 1.0 - clip_range, 1.0 + clip_range)
 
             individual_ppo_reward = torch.min(
-                ratio_seq * batch_advantages,
-                ratio_seq_clipped * batch_advantages
+                ratio_seq * seq_advantages,
+                ratio_seq_clipped * seq_advantages
             )
 
             ratio_ref_log = logprobs_ref_seq - logprobs_new_seq # [B, G]
@@ -305,14 +311,14 @@ for epoch in range(num_epochs):
 
             # log loss
             loss_ = 0.0
-            loss_ += grpo_loss.detach()
+            loss_ += gspo_loss.detach()
             dist.all_reduce(loss_, op=dist.ReduceOp.AVG)
             if master_process:
-                print(f'grpo training loss at step {step} with ppo epoch {inner_iter} is {loss_:.4f}')
+                print(f'gspo training loss at step {step} with ppo epoch {inner_iter} is {loss_:.4f}')
                 with open(log_file, "a") as f:
-                    f.write(f'grpo training loss at step {step} with ppo_epoch {inner_iter} is: {loss_:.4f}\n')
+                    f.write(f'gspo training loss at step {step} with ppo_epoch {inner_iter} is: {loss_:.4f}\n')
 
-            grpo_loss.backward()
+            gspo_loss.backward()
             torch.nn.utils.clip_grad_norm(policy_model.parameters(), max_norm=max_grad_norm)
             lr = get_lr(step, max_steps)
             for param_group in optimizer.param_groups:
@@ -322,7 +328,7 @@ for epoch in range(num_epochs):
 
         # checkpoint
         if master_process and (step % 50 == 0 or step == max_steps - 1):
-            ckpt_dir = f"{log_dir}/qwen2.5-1-5b-grpo-step{step+1}"
+            ckpt_dir = f"{log_dir}/qwen2.5-1-5b-gspo-step{step+1}"
             policy_model.module.save_pretrained(ckpt_dir)
             tokenizer.save_pretrained(ckpt_dir)
 
