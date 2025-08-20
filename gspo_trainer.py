@@ -26,6 +26,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from datasets import load_from_disk
 from torch.utils.data import Dataset, DataLoader
+import wandb
 
 from utils import (
     extract_hash_answer, 
@@ -104,6 +105,18 @@ optimizer.zero_grad(set_to_none = True)
 
 # setup log
 if master_process:
+    wandb.init(
+        project="gspo-training",
+        name=f"gspo-qwen2.5-1.5b-{rank}",
+        config={
+            "model_name": model_name,
+            "clip_range": clip_range,
+            "kl_coef": kl_coef,
+            "G": G,
+            "learning_rate": initial_learning_rate
+        }
+    )
+
     log_dir = "./gspo_models"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"log.txt")
@@ -314,6 +327,12 @@ for epoch in range(num_epochs):
             loss_ += gspo_loss.detach()
             dist.all_reduce(loss_, op=dist.ReduceOp.AVG)
             if master_process:
+                wandb.log({
+                    "train_loss": loss_.item(),
+                    "step": step,
+                    "ppo_epoch": inner_iter,
+                    "learning_rate": lr
+                })
                 print(f'gspo training loss at step {step} with ppo epoch {inner_iter} is {loss_:.4f}')
                 with open(log_file, "a") as f:
                     f.write(f'gspo training loss at step {step} with ppo_epoch {inner_iter} is: {loss_:.4f}\n')
